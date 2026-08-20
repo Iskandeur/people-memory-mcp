@@ -272,7 +272,14 @@ class GraphRepository:
                     for key, value in fields.items()
                     if value is not None and existing.get(key) not in (None, "", value)
                 }
-                if conflicts and not overwrite:
+                # A changed job title/employer alone isn't ambiguous — it's just LinkedIn
+                # reporting a new headline. Auto-apply it and keep the old one in the summary
+                # instead of stopping the sync every time (Iskandeur, 2026-08-20).
+                headline_keys = {"current_org", "current_role"}
+                other_conflicts = {
+                    key: value for key, value in conflicts.items() if key not in headline_keys
+                }
+                if conflicts and not overwrite and other_conflicts:
                     return {
                         "status": "needs_confirmation",
                         "reason": (
@@ -281,6 +288,16 @@ class GraphRepository:
                         "person": candidates[0],
                         "conflicts": conflicts,
                     }
+                if conflicts and not overwrite:
+                    old_org = existing.get("current_org")
+                    old_role = existing.get("current_role")
+                    old_headline = " — ".join(part for part in (old_org, old_role) if part)
+                    if old_headline:
+                        note = f"Ancien intitulé LinkedIn : {old_headline}"
+                        prior_summary = existing.get("summary")
+                        fields["summary"] = (
+                            f"{note}\n{prior_summary}" if prior_summary else note
+                        )
                 updates = {key: value for key, value in fields.items() if value is not None}
                 if updates:
                     assignments = sql.SQL(", ").join(
