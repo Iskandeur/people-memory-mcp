@@ -445,15 +445,28 @@ class GraphRepository:
         source: str = "agent",
         confidence: str = "stated",
     ) -> dict[str, Any]:
+        # `facts_person_key_value_uidx` is a partial unique index (value is not null), so
+        # re-asserting a fact we already hold used to raise UniqueViolation and abort the whole
+        # caller — a re-run of the LinkedIn sync died on the first connection it had already
+        # imported. Recording a known fact is a no-op, not an error.
         row = self.db.fetch_one(
             """
             insert into facts (person_id, key, value, num, date, source, confidence)
             values (%s, %s, %s, %s, %s, %s, %s)
+            on conflict (person_id, key, value) where value is not null do nothing
             returning *
             """,
             (person_id, key, value, num, fact_date, source, confidence),
         )
-        return row or {}
+        if row:
+            return row
+        # Already known: return the stored fact untouched. We deliberately do not update source
+        # or confidence — an import must never quietly downgrade the provenance of a stated fact.
+        existing = self.db.fetch_one(
+            "select * from facts where person_id = %s and key = %s and value = %s",
+            (person_id, key, value),
+        )
+        return existing or {}
 
     def record_interaction(
         self,

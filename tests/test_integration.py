@@ -73,6 +73,18 @@ def test_people_memory_end_to_end() -> None:
     assert reverse["a_id"] == ada["person"]["id"]
     assert repo.status()["relationships"] == 1
     repo.add_fact(ada["person"]["id"], "favorite_language", "Python", source="test")
+    # Re-asserting a known fact is an idempotent no-op. Before the fix, the partial unique index
+    # raised UniqueViolation and killed the caller: a second LinkedIn sync died on the first
+    # connection it had already imported.
+    again = repo.add_fact(
+        ada["person"]["id"],
+        "favorite_language",
+        "Python",
+        source="linkedin",
+        confidence="inferred",
+    )
+    assert again["source"] == "test", "an import must not downgrade the provenance of a stated fact"
+    assert len(repo.get_person(ada["person"]["id"])["facts"]) == 1, "no duplicate row"
     repo.record_interaction(
         ada["person"]["id"], date(2026, 8, 3), "coffee", "Discussed compilers", "test"
     )
