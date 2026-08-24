@@ -5,6 +5,7 @@ from datetime import date
 from typing import Any
 
 from psycopg import sql
+from psycopg.errors import UniqueViolation
 
 from .db import Database
 from .sql_guard import guard_read, guard_write
@@ -445,19 +446,29 @@ class GraphRepository:
         source: str = "agent",
         confidence: str = "stated",
     ) -> dict[str, Any]:
-        # `facts_person_key_value_uidx` is a partial unique index (value is not null), so
-        # re-asserting a fact we already hold used to raise UniqueViolation and abort the whole
+        # Re-asserting a fact we already hold used to raise UniqueViolation and abort the whole
         # caller — a re-run of the LinkedIn sync died on the first connection it had already
         # imported. Recording a known fact is a no-op, not an error.
-        row = self.db.fetch_one(
-            """
-            insert into facts (person_id, key, value, num, date, source, confidence)
-            values (%s, %s, %s, %s, %s, %s, %s)
-            on conflict (person_id, key, value) where value is not null do nothing
-            returning *
-            """,
-            (person_id, key, value, num, fact_date, source, confidence),
-        )
+        #
+        # We catch the violation rather than spelling out `on conflict (person_id, key, value)`:
+        # inferring a conflict target requires the matching index to already exist, and a database
+        # that predates the `facts_person_key_value_uidx` migration would then fail on EVERY insert
+        # instead of only on duplicates — which is exactly what broke CI on 2026-08-23, where the
+        # index lived in production but not in the migrations. Catching works with or without the
+        # index, and also covers the race where two writers insert the same fact at once.
+        # `fetch_one` opens its own autocommit connection per call, so a failed statement leaves
+        # no transaction to roll back.
+        try:
+            row = self.db.fetch_one(
+                """
+                insert into facts (person_id, key, value, num, date, source, confidence)
+                values (%s, %s, %s, %s, %s, %s, %s)
+                returning *
+                """,
+                (person_id, key, value, num, fact_date, source, confidence),
+            )
+        except UniqueViolation:
+            row = None
         if row:
             return row
         # Already known: return the stored fact untouched. We deliberately do not update source
