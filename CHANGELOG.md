@@ -70,6 +70,17 @@ All notable changes to People Memory are documented here.
   than guess if a value differing only by case belongs to two different people; merge them first.
 - The same profile URL in another case is no longer reported as a conflict by `remember_person`,
   which used to make it unanswerable for any importer that does not control casing.
+- **A sync no longer freezes a person whose LinkedIn slug changed.** `linkedin_url` counted as a
+  conflicting field, so when a member edited their profile URL every later update of that record —
+  employer, headline — was refused at each run, forever. The current URL now lands, and the old one
+  stays as a `linkedin` identifier so a stale export still recognises the same person.
+- **A different display name on the same LinkedIn profile no longer asks.** One profile URL cannot
+  be two people: emoji, accents, or an abbreviated surname are now applied instead of stopping the
+  import. A shared profile is also accepted when the two names are the same words, which covers an
+  email or phone match on a re-spelled name. A shared email on a genuinely different name still asks.
+- **A shared first name no longer counts as a similar name.** The similarity check compared whole
+  strings, so two people called Camille, Hugo or Florian scored above the floor and stopped the
+  import. The surname must now resemble too, and an inverted name order still matches.
 
 ### Security
 

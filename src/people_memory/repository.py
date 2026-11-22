@@ -109,6 +109,50 @@ def _name_similarity(left: str, right: str) -> float:
     return max(direct, reordered)
 
 
+# En dessous de ce seuil, deux noms ne partagent pas un patronyme : ils partagent un prénom.
+NAME_SIMILARITY_FLOOR = 0.78
+SURNAME_SIMILARITY_FLOOR = 0.7
+
+
+def _surname_similarity(left: str, right: str) -> float:
+    """La ressemblance des PATRONYMES, quel que soit l'ordre des mots.
+
+    `_name_similarity` compare la chaîne entière, si bien qu'un prénom partagé suffit à dépasser
+    0,78 : « Camille Morin » et « Camille Lemoine » marquent 0,86 sur le seul prénom, assez pour
+    réveiller quelqu'un sur deux personnes différentes (mesuré le 22/11, tous les prénoms courants
+    y passent). Le patronyme est le dernier mot de `left`, comparé à CHAQUE mot de `right` — un
+    « Forien Dominique » inversé retrouve donc « Dominique Forien ».
+    """
+    left_tokens = _normalize_name(left).split()
+    right_tokens = _normalize_name(right).split()
+    if not left_tokens or not right_tokens:
+        return 0.0
+    return max(
+        SequenceMatcher(None, left_tokens[-1], token).ratio() for token in right_tokens
+    )
+
+
+def _names_agree(left: str, right: str) -> bool:
+    """Deux écritures du MÊME nom, et non deux noms qui se ressemblent.
+
+    Un nom d'affichage LinkedIn bouge sans que la personne change : emoji ajouté ou retiré, accent
+    perdu à l'export, prénom abrégé (« Landry F » pour « Landry FOKAM »), crédential collé au
+    patronyme (« Franck Sega, CAIA »). Le test est l'égalité après normalisation, ou l'abrègement
+    mot à mot du plus court dans le plus long.
+    """
+    left_tokens = _normalize_name(left).split()
+    right_tokens = _normalize_name(right).split()
+    if not left_tokens or not right_tokens:
+        return False
+    if left_tokens == right_tokens:
+        return True
+    shorter, longer = sorted((left_tokens, right_tokens), key=len)
+    return all(
+        short == long or long.startswith(short) or short.startswith(long)
+        for short, long in zip(shorter, longer, strict=False)
+    )
+
+
 class GraphRepository:
     def __init__(self, db: Database):
         self.db = db
@@ -435,7 +479,11 @@ class GraphRepository:
                     "reason": "More than one person matches. Ask the user which one.",
                     "candidates": candidates,
                 }
-            if candidates and candidates[0]["full_name"].casefold() != full_name.casefold():
+            # Un nom d'affichage différent sur la même fiche n'est pas un désaccord d'identité :
+            # emoji, accent, prénom abrégé. Mesuré le 22/11, cette seule branche immobilisait une
+            # vingtaine de contacts dont les mises à jour LinkedIn étaient refusées chaque jour.
+            # Deux noms qui n'ont rien en commun restent une question (identifiant mal rattaché).
+            if candidates and not _names_agree(candidates[0]["full_name"], full_name):
                 return {
                     "status": "needs_confirmation",
                     "reason": (
@@ -457,7 +505,10 @@ class GraphRepository:
                 similar = []
                 for person in people:
                     similarity = _name_similarity(person["full_name"], full_name)
-                    if similarity >= 0.78:
+                    if similarity >= NAME_SIMILARITY_FLOOR and (
+                        _surname_similarity(person["full_name"], full_name)
+                        >= SURNAME_SIMILARITY_FLOOR
+                    ):
                         similar.append({**person, "similarity": similarity})
                 similar.sort(key=lambda person: person["similarity"], reverse=True)
                 similar = similar[:5]
@@ -504,8 +555,16 @@ class GraphRepository:
                 # reporting a new headline. Auto-apply it and keep the old one in the summary
                 # instead of stopping the sync every time (Iskandeur, 2026-08-20).
                 headline_keys = {"current_org", "current_role"}
+                # `linkedin_url` is the identifier this importer maintains, and LinkedIn is its
+                # source of truth: a member who edits their profile slug made the stored value
+                # stale, not contradictory. Blocking on it froze every later update for that person
+                # — measured 22/11, ten contacts whose headline and employer had stopped moving.
+                # The old URL is kept as an identifier below, so the stale spelling still matches.
+                identifier_keys = {"linkedin_url"}
                 other_conflicts = {
-                    key: value for key, value in conflicts.items() if key not in headline_keys
+                    key: value
+                    for key, value in conflicts.items()
+                    if key not in headline_keys | identifier_keys
                 }
                 if conflicts and not overwrite and other_conflicts:
                     return {
@@ -516,6 +575,16 @@ class GraphRepository:
                         "person": candidates[0],
                         "conflicts": conflicts,
                     }
+                old_linkedin_url = (conflicts.get("linkedin_url") or {}).get("existing")
+                if old_linkedin_url and not overwrite:
+                    conn.execute(
+                        """
+                        insert into identifiers (person_id, kind, value, source)
+                        values (%s, 'linkedin', %s, %s)
+                        on conflict (kind, value) do nothing
+                        """,
+                        (person_id, _normalize_identifier(old_linkedin_url), source),
+                    )
                 if conflicts and not overwrite:
                     old_org = existing.get("current_org")
                     old_role = existing.get("current_role")
